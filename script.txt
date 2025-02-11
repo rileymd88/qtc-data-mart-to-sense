@@ -1,0 +1,446 @@
+///$tab Main script
+LET runByAutomation = '<RUN_BY_AUTOMATION>';
+
+// If script ran via automation
+IF '$(runByAutomation)' = 'YES' THEN
+  // Define variables from data pipeline
+  LET projectId = '<PROJECT_ID>';
+  LET dataMartId = '<DATA_MART_ID>';
+  LET factFilter = '<FACT_FILTER>';
+  LET tenant = '<TENANT>';
+  LET apiToken = '<API_TOKEN>';
+  LET qtcDataConnection = '<QTC_DATA_CONNECTION>';
+  LET qtcDatabaseConnection = '<QTC_DATABASE_CONNECTION>';
+
+// If script ran manually
+ELSE
+  // Define variables from data pipeline
+  LET projectId = '66f67f7bf47323f4f36072b2';
+  LET dataMartId = 'sales_data_mart-dnps';
+  LET factFilter = 'SalesDocuments_Fact';
+  LET tenant = 'ffr-prod.eu.qlikcloud.com';
+  LET apiToken = '';
+  LET qtcDataConnection = 'QTC metadata';
+  LET qtcDatabaseConnection = 'DA_Connections:Snowflake_Supply_Chain_Plant_Maintenance';
+END IF  
+
+// Load the fact tables in scope into an island table
+LET inScopeFacts = Replace('$(factFilter)', ',', Chr(13));
+
+inScopeFacts:
+LOAD * INLINE [
+inScopeFacts
+$(inScopeFacts)
+];
+
+LIB CONNECT TO '$(qtcDataConnection)';
+
+// Get information about the tables in the datamart
+RestConnectorMasterTable:
+SQL SELECT 
+	"__KEY_dataEntities",
+	(SELECT 
+		"type" AS "type_u8",
+		"newName",
+		"id" AS "id_u0",
+		"__FK_dataEntity",
+		"__KEY_dataEntity"
+	FROM "dataEntity" PK "__KEY_dataEntity" FK "__FK_dataEntity")
+FROM JSON (wrap off) "dataEntities" PK "__KEY_dataEntities"
+WITH CONNECTION(
+	Url "https://$(tenant)/api/v1/data-projects/$(projectId)/data-apps/$(dataMartId)/data-entities",
+	HTTPHEADER "Authorization" "Bearer $(apiToken)"
+);
+
+[tables]:
+LOAD	
+	[type_u8] AS [factOrDimension],
+	[newName] AS [tableName],
+	[id_u0] AS [tableId]
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_dataEntity]);
+DROP TABLE RestConnectorMasterTable;
+
+RestConnectorMasterTable:
+SQL SELECT 
+	"__KEY_dataEntities",
+	(SELECT 
+		"__FK_dataEntity",
+		"__KEY_dataEntity",
+		(SELECT 
+			"dbSchema",
+			"dbName",
+			"entityId" AS "entityId_u0",
+			"__FK_tableDef",
+			"__KEY_tableDef"
+		FROM "tableDef" PK "__KEY_tableDef" FK "__FK_tableDef")
+	FROM "dataEntity" PK "__KEY_dataEntity" FK "__FK_dataEntity")
+FROM JSON (wrap off) "dataEntities" PK "__KEY_dataEntities"
+WITH CONNECTION(
+	Url "https://$(tenant)/api/v1/data-projects/$(projectId)/data-apps/$(dataMartId)/data-entities",
+	HTTPHEADER "Authorization" "Bearer $(apiToken)"
+);
+
+Join(tables)
+LOAD	
+	[dbSchema],
+	[dbName],
+	[entityId_u0] AS [tableId]
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_tableDef]);
+DROP TABLE RestConnectorMasterTable;
+
+// Get information about the columns in the data mart tables
+RestConnectorMasterTable:
+SQL SELECT 
+	"__KEY_dataEntities",
+	(SELECT 
+		"__FK_dataEntity",
+		"__KEY_dataEntity",
+		(SELECT 
+			"entityId" AS "entityId_u0",
+			"__KEY_tableDef",
+			"__FK_tableDef",
+			(SELECT 
+				"name" AS "name_u0",
+				"id",
+				"__FK_columns",
+				"__KEY_columns"
+			FROM "columns" PK "__KEY_columns" FK "__FK_columns")
+		FROM "tableDef" PK "__KEY_tableDef" FK "__FK_tableDef")
+	FROM "dataEntity" PK "__KEY_dataEntity" FK "__FK_dataEntity")
+FROM JSON (wrap off) "dataEntities" PK "__KEY_dataEntities"
+WITH CONNECTION(
+	Url "https://$(tenant)/api/v1/data-projects/$(projectId)/data-apps/$(dataMartId)/data-entities",
+	HTTPHEADER "Authorization" "Bearer $(apiToken)"
+);
+
+[columnsAndTables]:
+LOAD	
+	[name_u0] AS [columnName],
+	[id] AS [columnId],
+	[__FK_columns] AS [__KEY_tableDef]
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_columns]);
+
+
+join(columnsAndTables)
+LOAD
+	[entityId_u0] AS [tableId],
+	[__KEY_tableDef]
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_tableDef]);
+DROP TABLE RestConnectorMasterTable;
+Drop field [__KEY_tableDef];
+
+
+Join(columnsAndTables)
+LOAD *  Resident tables;
+
+finalColumnsAndTables:
+LOAD *,  tableName & '|' & [columnName] as mapKey Resident columnsAndTables;
+Drop table columnsAndTables;
+Rename table finalColumnsAndTables to columnsAndTables;
+
+// Get the relationships which are in the data mart 
+RestConnectorMasterTable:
+SQL SELECT 
+	"__KEY_dataEntities",
+	(SELECT 
+		"__FK_dataEntity",
+		"__KEY_dataEntity",
+		(SELECT 
+			"__FK_starSchemaDataEntitySettings",
+			"__KEY_starSchemaDataEntitySettings",
+			(SELECT 
+				"dimensionRelationshipPath",
+				"__FK_factDimension",
+				"__KEY_factDimension"
+			FROM "factDimension" PK "__KEY_factDimension" FK "__FK_factDimension")
+		FROM "starSchemaDataEntitySettings" PK "__KEY_starSchemaDataEntitySettings" FK "__FK_starSchemaDataEntitySettings")
+	FROM "dataEntity" PK "__KEY_dataEntity" FK "__FK_dataEntity")
+FROM JSON (wrap off) "dataEntities" PK "__KEY_dataEntities"
+WITH CONNECTION(
+	Url "https://$(tenant)/api/v1/data-projects/$(projectId)/data-apps/$(dataMartId)/data-entities",
+	HTTPHEADER "Authorization" "Bearer $(apiToken)"
+);
+
+[relationshipKeys]:
+LOAD	[dimensionRelationshipPath] as relationshipKey
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_factDimension]);
+DROP TABLE RestConnectorMasterTable;
+
+// Get all the data apps in the data project
+RestConnectorMasterTable:
+SQL SELECT 
+	"__KEY_dataApps",
+	(SELECT 
+		"type" AS "type_u0",
+		"id",
+		"name",
+		"__FK_dataApp"
+	FROM "dataApp" FK "__FK_dataApp")
+FROM JSON (wrap off) "dataApps" PK "__KEY_dataApps"
+WITH CONNECTION(
+	Url "https://$(tenant)/api/v1/data-projects/$(projectId)/data-apps",
+	HTTPHEADER "Authorization" "Bearer $(apiToken)"
+);
+
+[dataApps]:
+LOAD	
+	[type_u0] AS [dataAppType],
+	[id] AS [dataAppId],
+	[name] AS [dataAppName]
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_dataApp])
+;
+DROP TABLE RestConnectorMasterTable;
+
+// Get input -> main table mappings
+RestConnectorMasterTable:
+SQL SELECT 
+	"__KEY_dataEntities",
+	(SELECT 
+		"newName",
+		"id" AS "id_u0",
+		"name" AS "name_u8",
+		"__KEY_dataEntity",
+		"__FK_dataEntity",
+		(SELECT 
+			"entityId",
+			"name",
+			"__FK_inputDataEntities"
+		FROM "inputDataEntities" FK "__FK_inputDataEntities")
+	FROM "dataEntity" PK "__KEY_dataEntity" FK "__FK_dataEntity")
+FROM JSON (wrap off) "dataEntities" PK "__KEY_dataEntities"
+WITH CONNECTION(
+	Url "https://$(tenant)/api/v1/data-projects/$(projectId)/data-apps/$(dataMartId)/data-entities",
+	HTTPHEADER "Authorization" "Bearer $(apiToken)"
+);
+
+[tableMappings]:
+LOAD	
+	[entityId] AS [inputTableId],
+	[name] AS [inputTableName],
+	[__FK_inputDataEntities] AS [__KEY_dataEntity]
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_inputDataEntities]);
+
+
+Join(tableMappings)
+LOAD	
+	[newName] AS [mainTableNewName],
+	[id_u0] AS [mainTableId],
+	[name_u8] AS [mainTableName],
+	[__KEY_dataEntity]
+RESIDENT RestConnectorMasterTable
+WHERE NOT IsNull([__FK_dataEntity]);
+
+
+DROP TABLE RestConnectorMasterTable;
+Drop field [__KEY_dataEntity];
+
+// Loop through all data apps and get the relationships (making sure to only save the relationships used in the final data mart)
+For d = 0 to NoOfRows('dataApps') -1
+
+  let dataApp = Peek('dataAppId', $(d), 'dataApps');
+
+  RestConnectorMasterTable:
+  SQL SELECT 
+      "__KEY_entityRelationships",
+      (SELECT 
+          "id",
+          "__KEY_entityRelationship",
+          "__FK_entityRelationship",
+          (SELECT 
+              "name",
+              "entityId" AS "sourceTableId",
+              "__FK_sourceEntity"
+          FROM "sourceEntity" FK "__FK_sourceEntity"),
+          (SELECT 
+              "name" AS "name_u0",
+              "entityId" AS "targetTableId",
+              "__FK_targetEntity"
+          FROM "targetEntity" FK "__FK_targetEntity"),
+          (SELECT 
+              "sourceColumn",
+              "targetColumn",
+              "sourceColumnId",
+              "targetColumnId",
+              "__FK_columnRelationships"
+          FROM "columnRelationships" FK "__FK_columnRelationships")
+      FROM "entityRelationship" PK "__KEY_entityRelationship" FK "__FK_entityRelationship")
+  FROM JSON (wrap off) "entityRelationships" PK "__KEY_entityRelationships"
+  WITH CONNECTION(Url "https://$(tenant)/api/v1/data-projects/$(projectId)/data-apps/$(dataApp)/entity-relationships",
+	HTTPHEADER "Authorization" "Bearer $(apiToken)"
+  );
+
+  [tmpRelationships]:
+  LOAD	
+  	  [name] as sourceTableName,
+      sourceTableId,
+      [__FK_sourceEntity] AS [__KEY_entityRelationship]
+  RESIDENT RestConnectorMasterTable
+  WHERE NOT IsNull([__FK_sourceEntity]);
+
+
+  join(tmpRelationships)
+  LOAD	
+  	  [name_u0] AS [targetTableName],
+  	  targetTableId,		
+      [__FK_targetEntity] AS [__KEY_entityRelationship]
+  RESIDENT RestConnectorMasterTable
+  WHERE NOT IsNull([__FK_targetEntity]);
+
+
+  join(tmpRelationships)
+  LOAD	
+  	  [sourceColumn],
+      [targetColumn],
+      [sourceColumnId],
+      [targetColumnId],
+      [__FK_columnRelationships] AS [__KEY_entityRelationship]
+  RESIDENT RestConnectorMasterTable
+  WHERE NOT IsNull([__FK_columnRelationships]);
+
+
+  join(tmpRelationships)
+  LOAD	[id] as relationshipKey,
+      [__KEY_entityRelationship]
+  RESIDENT RestConnectorMasterTable
+  WHERE NOT IsNull([__FK_entityRelationship]);
+
+  DROP TABLE RestConnectorMasterTable;
+  
+  IF $(d) = 0 THEN
+    relationships:
+    NoConcatenate
+    LOAD * Resident tmpRelationships WHERE Exists(relationshipKey);
+  ELSE
+    Concatenate(relationships)
+  	LOAD * Resident tmpRelationships WHERE Exists(relationshipKey);
+  ENDIF
+  
+  Drop table tmpRelationships;
+
+Next d;
+
+Drop field __KEY_entityRelationship;
+
+// Create input -> main table mapping
+inputToMainTableMap:
+MAPPING LOAD
+	inputTableName,
+    mainTableName
+Resident tableMappings;
+Drop table tableMappings;
+
+// Join keys into columnsAndTables
+Join(columnsAndTables)
+LOAD
+    ApplyMap('inputToMainTableMap', targetTableName, targetTableName) & '|' & targetColumn as mapKey,
+    targetColumn & ' as [%Key' & sourceColumn & '|' & targetColumn & ']' as tmpMappedField1
+RESIDENT relationships;
+
+Join(columnsAndTables)
+LOAD
+    ApplyMap('inputToMainTableMap', sourceTableName, sourceTableName) & '|' & sourceColumn as mapKey,
+    sourceColumn & ' as [%Key' & sourceColumn & '|' & targetColumn & ']' as tmpMappedField2
+RESIDENT relationships;
+
+columnsAndTablesDistinct:
+NoConcatenate
+Load Distinct *, If(IsNull(tmpMappedField1), tmpMappedField2, tmpMappedField1) as mappedField Resident columnsAndTables;
+Drop table columnsAndTables;
+Drop fields tmpMappedField1, tmpMappedField2;
+
+LIB CONNECT TO '$(qtcDatabaseConnection)';
+
+// Generate a dummy table for facts as we will concatenate all facts into one table
+facts:
+LOAD 1 as init AutoGenerate 1; 
+
+// Loop through all tables individually to load them all
+For t = 0 to NoOfRows('tables') -1 
+  
+  // Get table name and db name/schema
+  LET tableName = Peek('tableName', $(t), 'tables');
+  LET dbName = Peek('dbName', $(t), 'tables');
+  LET dbSchema = Peek('dbSchema', $(t), 'tables');
+  LET factOrDimension = Peek('factOrDimension', $(t), 'tables');
+  
+  
+  // Create a table with one row which contains a concacatenated list of all the key fields for the table we are loading
+  tmpKeys:
+  LOAD
+   Concat(mappedField,',') as mappedKeys, tableName 
+  Resident columnsAndTablesDistinct
+  WHERE tableName= '$(tableName)' 
+  Group by tableName
+  ;
+  
+
+  
+  // Save the keys from the above tmpKeys into a variable
+  LET keys = Peek('mappedKeys', 0, 'tmpKeys');
+  TRACE keys for $(tableName): $(keys);
+  Drop table tmpKeys;
+  
+  // Qualify everything besides the key fields which always start with %Key
+  Qualify *;
+  Unqualify "%Key*";
+  
+  TRACE loading table: $(tableName);
+  
+  // Load the table with keys if it has keys
+  IF Len('$(keys)') > 1 THEN
+    // If it is a dimension table then load it as it's own table
+    IF '$(factOrDimension)' = 'DIMENSION' THEN
+      [$(tableName)]:
+      LOAD
+        *,
+        $(keys)
+      ;
+      SELECT * FROM "$(dbName)"."$(dbSchema)"."$(tableName)";
+    ELSE
+      // If it is a fact table then concatenate it and do not qualify
+      Unqualify *;
+      Concatenate(facts)
+      LOAD
+        *,
+        1 as [$(tableName)_Flag],
+        $(keys)
+      ;
+      SELECT * FROM "$(dbName)"."$(dbSchema)"."$(tableName)";
+    END IF  
+  // Load the table without keys if it has no keys
+  ELSE
+    // If it is a dimension table then load it as it's own table
+    IF '$(factOrDimension)' = 'DIMENSION' THEN 
+      [$(tableName)]:
+      SELECT * FROM "$(dbName)"."$(dbSchema)"."$(tableName)";
+    ELSE
+      // If it is a fact table then concatenate it and do not qualify
+      Unqualify *;
+      Concatenate(facts)
+      LOAD
+        *,
+        1 as [$(tableName)_Flag]
+      ;
+      SELECT * FROM "$(dbName)"."$(dbSchema)"."$(tableName)";
+    END IF  
+  END IF
+  
+  // Unqualify everything for the next table load
+  Unqualify *;
+  
+Next t;
+
+Drop field init;
+Drop table inScopeFacts;
+Drop table relationships;
+Drop table relationshipKeys;
+Drop table columnsAndTablesDistinct;
+Drop table dataApps;
+Drop table tables;
