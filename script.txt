@@ -1,7 +1,6 @@
-///$tab Main script
 LET runByAutomation = '<RUN_BY_AUTOMATION>';
 
-// If script ran via automation
+// If script ran manually
 IF '$(runByAutomation)' = 'YES' THEN
   // Define variables from data pipeline
   LET projectId = '<PROJECT_ID>';
@@ -11,17 +10,17 @@ IF '$(runByAutomation)' = 'YES' THEN
   LET apiToken = '<API_TOKEN>';
   LET qtcDataConnection = '<QTC_DATA_CONNECTION>';
   LET qtcDatabaseConnection = '<QTC_DATABASE_CONNECTION>';
-
-// If script ran manually
+  
+// If script ran via automation
 ELSE
   // Define variables from data pipeline
-  LET projectId = '66f67f7bf47323f4f36072b2';
-  LET dataMartId = 'sales_data_mart-dnps';
-  LET factFilter = 'SalesDocuments_Fact';
+  LET projectId = '6759658a0c5078e3426eecee';
+  LET dataMartId = 'finance_data_mart-zov7';
+  LET factFilter = 'AccountsPayables_LineItems';
   LET tenant = 'ffr-prod.eu.qlikcloud.com';
   LET apiToken = '';
   LET qtcDataConnection = 'QTC metadata';
-  LET qtcDatabaseConnection = 'DA_Connections:Snowflake_Supply_Chain_Plant_Maintenance';
+  LET qtcDatabaseConnection = 'DA_Connections:Snowflake_FINANCE_TABLES';
 END IF  
 
 // Load the fact tables in scope into an island table
@@ -58,7 +57,7 @@ LOAD
 	[newName] AS [tableName],
 	[id_u0] AS [tableId]
 RESIDENT RestConnectorMasterTable
-WHERE NOT IsNull([__FK_dataEntity]);
+WHERE NOT IsNull([__FK_dataEntity]) and (type_u8 = 'DIMENSION' or Exists(inScopeFacts,newName));
 DROP TABLE RestConnectorMasterTable;
 
 RestConnectorMasterTable:
@@ -81,7 +80,7 @@ WITH CONNECTION(
 	HTTPHEADER "Authorization" "Bearer $(apiToken)"
 );
 
-Join(tables)
+Left Join(tables)
 LOAD	
 	[dbSchema],
 	[dbName],
@@ -138,7 +137,8 @@ Join(columnsAndTables)
 LOAD *  Resident tables;
 
 finalColumnsAndTables:
-LOAD *,  tableName & '|' & [columnName] as mapKey Resident columnsAndTables;
+LOAD *,  tableName & '|' & [columnName] as mapKey Resident columnsAndTables
+;
 Drop table columnsAndTables;
 Rename table finalColumnsAndTables to columnsAndTables;
 
@@ -346,14 +346,22 @@ RESIDENT relationships;
 Join(columnsAndTables)
 LOAD
     ApplyMap('inputToMainTableMap', sourceTableName, sourceTableName) & '|' & sourceColumn as mapKey,
-    sourceColumn & ' as [%Key' & sourceColumn & '|' & targetColumn & ']' as tmpMappedField2
+    sourceColumn & ' as [%Key' &  sourceColumn & '|' & targetColumn & ']' as tmpMappedField2
 RESIDENT relationships;
 
 columnsAndTablesDistinct:
 NoConcatenate
-Load Distinct *, If(IsNull(tmpMappedField1), tmpMappedField2, tmpMappedField1) as mappedField Resident columnsAndTables;
+Load Distinct *, If(isNull(tmpMappedField1), tmpMappedField2,tmpMappedField1)  as mappedField Resident columnsAndTables;
 Drop table columnsAndTables;
 Drop fields tmpMappedField1, tmpMappedField2;
+
+mappedKeys:
+LOAD Distinct
+tableName,
+mappedField
+Resident columnsAndTablesDistinct
+;
+
 
 LIB CONNECT TO '$(qtcDatabaseConnection)';
 
@@ -373,14 +381,13 @@ For t = 0 to NoOfRows('tables') -1
   
   // Create a table with one row which contains a concacatenated list of all the key fields for the table we are loading
   tmpKeys:
-  LOAD
+  LOAD distinct
    Concat(mappedField,',') as mappedKeys, tableName 
-  Resident columnsAndTablesDistinct
+  Resident mappedKeys
   WHERE tableName= '$(tableName)' 
   Group by tableName
   ;
-  
-
+	
   
   // Save the keys from the above tmpKeys into a variable
   LET keys = Peek('mappedKeys', 0, 'tmpKeys');
@@ -438,6 +445,7 @@ For t = 0 to NoOfRows('tables') -1
 Next t;
 
 Drop field init;
+Drop table mappedKeys;
 Drop table inScopeFacts;
 Drop table relationships;
 Drop table relationshipKeys;
